@@ -16,9 +16,8 @@ env/
 *.ogg
 *.flac
 
-# Data & models
+# Data (학습 데이터)
 data/
-models/
 
 # Environment
 .env
