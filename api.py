@@ -13,7 +13,7 @@ api.py - 핑이 AI 분석 서비스 (FastAPI)
   GET  /health            — 헬스 체크
 
 실행:
-  uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+  uvicorn api:app --host 0.0.0.0 --port 8001 --reload
 =============================================================================
 """
 
@@ -47,10 +47,9 @@ logger = logging.getLogger(__name__)
 # 설정
 # ============================================================
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:password@localhost:5432/pingi",
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL 환경변수가 설정되지 않았습니다. .env 파일을 확인하세요.")
 
 UPLOAD_BASE = Path(os.getenv(
     "UPLOAD_BASE",
@@ -196,7 +195,8 @@ def convert_to_wav(input_path: Path) -> Path:
     if input_path.suffix.lower() == ".wav" and _is_real_wav(input_path):
         return input_path
 
-    output_path = Path(tempfile.mktemp(suffix=".wav"))
+    temp_dir = os.getenv("TEMP_DIR")
+    output_path = Path(tempfile.mktemp(suffix=".wav", dir=temp_dir))
     try:
         subprocess.run(
             ["ffmpeg", "-y", "-i", str(input_path), "-ar", "16000", "-ac", "1", "-f", "wav", str(output_path)],
@@ -451,4 +451,4 @@ async def analyze_baseline(req: BaselineRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("api:app", host="0.0.0.0", port=int(os.getenv("PORT", 8001)), reload=True)

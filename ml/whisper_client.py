@@ -3,8 +3,6 @@ whisper_client.py - Whisper STT API 클라이언트
 ================================================
 
 Mago Whisper API를 호출하여 음성을 텍스트로 변환합니다.
-
-API: https://op1-api.magovoice.com/whisper
 """
 
 import logging
@@ -12,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Union
 import httpx
+
+from .config import WHISPER_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -46,17 +46,15 @@ class WhisperResult:
 class WhisperClient:
     """Mago Whisper API 클라이언트."""
     
-    DEFAULT_BASE_URL = "https://op1-api.magovoice.com/whisper"
-    
     def __init__(
         self,
         base_url: str = None,
-        timeout: float = 30.0,
-        max_retries: int = 2,
+        timeout: float = None,
+        max_retries: int = None,
     ):
-        self.base_url = base_url or self.DEFAULT_BASE_URL
-        self.timeout = timeout
-        self.max_retries = max_retries
+        self.base_url = base_url or WHISPER_CONFIG.base_url
+        self.timeout = timeout if timeout is not None else WHISPER_CONFIG.timeout
+        self.max_retries = max_retries if max_retries is not None else WHISPER_CONFIG.max_retries
     
     async def transcribe(
         self,

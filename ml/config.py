@@ -6,6 +6,7 @@ config.py - ML 설정
 학습은 Pingi-demo에서 수행하고, 여기서는 추론만 합니다.
 """
 
+import os
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict
@@ -77,8 +78,7 @@ class InferenceConfig:
 class WhisperConfig:
     """Whisper STT API 설정."""
     
-    # API 엔드포인트
-    base_url: str = "https://op1-api.magovoice.com/whisper"
+    base_url: str = os.getenv("WHISPER_BASE_URL", "https://op1-api.magovoice.com/whisper")
     
     # 요청 설정
     timeout: float = 30.0
@@ -94,7 +94,7 @@ class WhisperConfig:
     max_decrease_ratio: float = 0.3  # 취함 판정 최대 감소율 (30%)
     
     # 활성화 여부 (한국어 데이터 검증 전까지 비활성화 권장)
-    enabled: bool = False
+    enabled: bool = os.getenv("WHISPER_ENABLED", "false").lower() == "true"
 
 
 # ============================================================
