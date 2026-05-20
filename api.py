@@ -74,7 +74,7 @@ fake_detector: Optional[FakeDrunkDetector] = None
 async def load_model():
     global detector, fake_detector
     logger.info("SVM 모델 로딩 중...")
-    detector = DrunkDetector(version="v2")
+    detector = DrunkDetector(version="v2-delta")    
     detector.load()
     if FAKE_DRUNK_CONFIG.enabled:
         try:

@@ -1,12 +1,11 @@
 """
 config.py - ML 설정
-===================
 
-모델 경로, 피처 설정, 추론 임계값을 중앙 관리합니다.
-학습은 Pingi-demo에서 수행하고, 여기서는 추론만 합니다.
+기본 production 모델: v2-delta (ALC delta-feature SVM)
+학습: ml/train_alc.py | 추론: ml/inference.py
+임계값은 models/final_weights.json (train_alc fit 결과) 우선 로드.
 """
 
-import os
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict
@@ -39,20 +38,23 @@ class FeatureConfig:
 
 @dataclass
 class InferenceConfig:
-    """추론 임계값 및 가중치."""
+    """추론 설정. level_thresholds / delta_threshold는 final_weights.json이 우선."""
 
-    model_version: str = "v2"
+    # production 기본. drunk_detector_v2-delta.pkl
+    model_version: str = "v2-delta"
 
-    # 취도 레벨 임계값 (0~5단계, ALC 데이터 6분위 기반)
-    # 각 단계별 Drunk 비율 증가: +12~18%p (통계적 유의미)
-    # 0단계: S:86% D:14% → 5단계: S:13% D:87%
+    # 아래 level_thresholds / delta_threshold는 JSON 없을 때 fallback.
+    # v2-delta fit 값은 final_weights.json 참고 (train_alc --mode delta).
+    #
+    # L0/L1: optimal_threshold (drunk proba, accuracy fit)
+    # L1~L5: drunk≥threshold proba 20% 분위 (train_alc --mode delta)
     level_thresholds: Dict[int, float] = field(default_factory=lambda: {
-        0: 0.26,   # 0단계 상한: Sober 86%, Drunk 14%
-        1: 0.37,   # 1단계 상한: Sober 74%, Drunk 26%
-        2: 0.49,   # 2단계 상한: Sober 58%, Drunk 42%
-        3: 0.62,   # 3단계 상한: Sober 44%, Drunk 56%
-        4: 0.74,   # 4단계 상한: Sober 25%, Drunk 75%
-        5: 1.0,    # 5단계: Sober 13%, Drunk 87%
+        0: 0.625,
+        1: 0.711,
+        2: 0.783,
+        3: 0.835,
+        4: 0.892,
+        5: 1.0,
     })
     
     level_descriptions: Dict[int, str] = field(default_factory=lambda: {
@@ -64,10 +66,9 @@ class InferenceConfig:
         5: "매우 취함",
     })
 
-    # 베이스라인 비교 방식 (Demo와 동일)
-    # delta = current_proba - baseline_proba >= threshold → drunk
-    # Demo full_pipeline.py에서 최적화된 값: 0.08 (75.1% 정확도 달성)
-    delta_threshold: float = 0.08
+    # v2-delta: proba(current-baseline) >= threshold → drunk (기본 0.625)
+    # v2 absolute legacy: (proba_current - proba_baseline) >= threshold
+    delta_threshold: float = 0.625
 
 
 # ============================================================
@@ -78,7 +79,8 @@ class InferenceConfig:
 class WhisperConfig:
     """Whisper STT API 설정."""
     
-    base_url: str = os.getenv("WHISPER_BASE_URL", "https://op1-api.magovoice.com/whisper")
+    # API 엔드포인트
+    base_url: str = "https://op1-api.magovoice.com/whisper"
     
     # 요청 설정
     timeout: float = 30.0
@@ -94,7 +96,7 @@ class WhisperConfig:
     max_decrease_ratio: float = 0.3  # 취함 판정 최대 감소율 (30%)
     
     # 활성화 여부 (한국어 데이터 검증 전까지 비활성화 권장)
-    enabled: bool = os.getenv("WHISPER_ENABLED", "false").lower() == "true"
+    enabled: bool = False
 
 
 # ============================================================
@@ -106,15 +108,42 @@ class FakeDrunkConfig:
     """연기/가짜 취함 감지 (fake_drunk_detector_v1.pkl)."""
 
     model_filename: str = "fake_drunk_detector_v1.pkl"
-    # proba[:, 1] >= threshold → 취한 척 (학습: 0=진짜 취함, 1=연기)
+    # proba[:, 1] >= threshold → 취한 척 (legacy, production 미사용)
     threshold: float = 0.5
-    enabled: bool = True
+    enabled: bool = False
 
     messages: tuple = (
         "취한 척 하신 거 같은데… 흠 ~ 🎭",
         "에헤이~ 연기 잘하시네요! 취한 척이에요 🎭",
         "술 취한 게 아니라 연기 아닌가요? 흠흠 ~",
         "핑이 눈엔 취한 척이에요! 🎭",
+    )
+
+
+# ============================================================
+# 합성 음성 감지 (OpenAI TTS vs 실제 녹음)
+# ============================================================
+
+@dataclass
+class SyntheticVoiceConfig:
+    """TTS/합성 음성 감지 — SVM + AASIST-L 앙상블.
+
+    v1: openSMILE SVM only
+    v2: SVM 주도 + AASIST-L 보조 앙상블
+    """
+
+    model_filename: str = "synthetic_voice_detector_v1.pkl"
+    weights_filename: str = "final_weights_synthetic.json"
+    aasist_weights: str = "AASIST-L.pth"
+    # proba[:, 1] >= threshold → synthetic (class 1)
+    threshold: float = 0.5
+    enabled: bool = True
+    aasist_enabled: bool = True  # AASIST 앙상블 활성화
+
+    messages: tuple = (
+        "합성 음성이에요! 🎙️ 실제 목소리로 다시 녹음해 주세요.",
+        "AI로 만든 목소리 같아요 🎙️ 마이크로 직접 녹음해 주세요.",
+        "핑이는 합성 음성은 분석하지 않아요 🎙️",
     )
 
 
@@ -126,6 +155,7 @@ FEATURE_CONFIG = FeatureConfig()
 INFERENCE_CONFIG = InferenceConfig()
 WHISPER_CONFIG = WhisperConfig()
 FAKE_DRUNK_CONFIG = FakeDrunkConfig()
+SYNTHETIC_VOICE_CONFIG = SyntheticVoiceConfig()
 
 
 def get_opensmile():
