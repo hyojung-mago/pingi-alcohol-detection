@@ -1,0 +1,36 @@
+# Pingi-AI Docker Compose
+
+services:
+  pingi-ai:
+    build: .
+    container_name: pingi-ai
+    env_file:
+      - .env
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - pingi_ai_tmp:/app/tmp
+      - pingi-backend_uploads_data:/app/uploads:ro
+    environment:
+      - PORT=8001
+      - TEMP_DIR=/app/tmp
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Seoul
+    restart: unless-stopped
+    networks:
+      - pingi_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  pingi_ai_tmp:
+  pingi-backend_uploads_data:
+    external: true
+
+networks:
+  pingi_net:
+    external: true
