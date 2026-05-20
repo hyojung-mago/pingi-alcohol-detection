@@ -306,6 +306,9 @@ async def analyze(req: AnalyzeRequest):
 
         baseline_features = load_baseline_features(req.member_id)
 
+        # 2) 발화 감지 체크 (predict_with_baseline 내부에서 수행)
+        #    음성이 없으면 ValueError → 422로 변환
+
         # Whisper 발화속도 분석 (선택적)
         current_speech_rate = None
         baseline_speech_rate = None
@@ -328,21 +331,24 @@ async def analyze(req: AnalyzeRequest):
             except Exception as e:
                 logger.warning(f"Whisper 분석 실패 (SVM만 사용): {e}")
 
-        if baseline_features is not None:
-            result = detector.predict_with_baseline(
-                str(wav_path),
-                baseline_features,
-                current_speech_rate=current_speech_rate,
-                baseline_speech_rate=baseline_speech_rate,
-            )
-            feature_changes = (
-                result.baseline_comparison.get("feature_changes")
-                if result.baseline_comparison
-                else None
-            )
-        else:
-            result = detector.predict(str(wav_path), return_features=True)
-            feature_changes = None
+        try:
+            if baseline_features is not None:
+                result = detector.predict_with_baseline(
+                    str(wav_path),
+                    baseline_features,
+                    current_speech_rate=current_speech_rate,
+                    baseline_speech_rate=baseline_speech_rate,
+                )
+                feature_changes = (
+                    result.baseline_comparison.get("feature_changes")
+                    if result.baseline_comparison
+                    else None
+                )
+            else:
+                result = detector.predict(str(wav_path), return_features=True)
+                feature_changes = None
+        except ValueError as e:
+            raise HTTPException(422, str(e))
 
         # inference.py가 직접 0~5 숫자 레벨 반환
         level = result.level

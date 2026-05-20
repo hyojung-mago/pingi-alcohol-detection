@@ -208,20 +208,25 @@ class DrunkDetector:
     ) -> PredictionResult:
         """delta_features: (current - baseline) 피처 → SVM proba.
 
-        change_pct = (proba - proba_at_zero_drift) × 100
+        핵심: SVM(zero_vector)의 "resting" 확률이 threshold 부근이므로,
+        레벨과 취함 판정은 baseline_proba 대비 delta를 사용해야 한다.
+
+        change_pct = (current_proba - baseline_proba) × 100
           - baseline과 동일하게 읽으면 ≈ 0 (본인 sober 대비 변화 없음)
-          - threshold 대비 초과량이 아님
         """
         delta_features = current_features - baseline_features
         X_delta = delta_features.reshape(1, -1)
         current_proba = float(self.model.predict_proba(X_delta)[0, 1])
         threshold = self.delta_threshold
 
-        # proba when delta_features=0 (baseline과 동일 drift). change_pct 기준점.
         X_zero = np.zeros_like(delta_features).reshape(1, -1)
         baseline_proba = float(self.model.predict_proba(X_zero)[0, 1])
-        # baseline 대비 proba drift (%p). threshold 대비 아님.
         delta = current_proba - baseline_proba
+
+        logger.info(
+            f"delta_features: baseline_proba={baseline_proba:.3f}, "
+            f"current_proba={current_proba:.3f}, delta={delta:.3f}"
+        )
 
         speech_rate_score = None
         speech_rate_info = None
@@ -254,12 +259,26 @@ class DrunkDetector:
                 "svm_weight": WHISPER_CONFIG.svm_weight,
             }
 
+        # 취함 판정: baseline 대비 delta 기준 (raw proba가 아님)
+        # 자연 음성 변동(같은 사람, 같은 상태)으로 delta 0.00~0.12 발생 가능
+        DELTA_DRUNK_THRESHOLD = 0.12
         if speech_rate_score is not None and speech_rate_score >= 0.5:
-            is_drunk = current_proba >= (threshold * 0.85) or speech_rate_score >= 0.7
+            is_drunk = delta >= (DELTA_DRUNK_THRESHOLD * 0.5) or speech_rate_score >= 0.7
         else:
-            is_drunk = current_proba >= threshold
+            is_drunk = delta >= DELTA_DRUNK_THRESHOLD
 
-        level = self._determine_level(current_proba)
+        # 레벨 판정: is_drunk=False이면 L0 강제
+        if not is_drunk:
+            level = 0
+            adjusted_proba = 0.0
+        else:
+            # delta를 level threshold 범위에 매핑
+            # DELTA_DRUNK_THRESHOLD를 넘은 만큼만 레벨에 반영
+            excess = delta - DELTA_DRUNK_THRESHOLD
+            anchor = self.level_thresholds[0]
+            adjusted_proba = max(0.0, min(1.0, anchor + excess))
+            level = self._determine_level(adjusted_proba)
+
         confidence, conf_score = self._calculate_confidence(final_proba)
         feature_changes = self._calculate_feature_changes(baseline_features, current_features)
 
@@ -267,6 +286,7 @@ class DrunkDetector:
             "baseline_proba": baseline_proba,
             "current_proba": current_proba,
             "delta": delta,
+            "adjusted_proba": adjusted_proba,
             "threshold": threshold,
             "training_mode": "delta_features",
             "feature_changes": feature_changes,
@@ -286,6 +306,27 @@ class DrunkDetector:
             baseline_comparison=baseline_comparison,
         )
 
+    # 발화 감지 최소 기준
+    MIN_VOICED_SEGMENTS_PER_SEC = 0.5
+    MIN_LOUDNESS = 0.05
+
+    def _check_voice_activity(self, features: np.ndarray) -> bool:
+        """녹음에 실제 발화가 포함되어 있는지 검사."""
+        names = self.extractor.feature_names
+        voiced_per_sec = 0.0
+        loudness = 0.0
+        for i, name in enumerate(names):
+            if "VoicedSegmentsPerSec" in name:
+                voiced_per_sec = float(features[i])
+            elif name == "loudness_sma3_amean":
+                loudness = float(features[i])
+        if voiced_per_sec < self.MIN_VOICED_SEGMENTS_PER_SEC or loudness < self.MIN_LOUDNESS:
+            logger.warning(
+                f"발화 미감지: voiced/sec={voiced_per_sec:.2f}, loudness={loudness:.4f}"
+            )
+            return False
+        return True
+
     def predict_with_baseline(
         self,
         audio_path: Union[str, Path],
@@ -295,20 +336,19 @@ class DrunkDetector:
     ) -> PredictionResult:
         """베이스라인 대비 취도 예측.
         
-        Demo에서 75.1% 정확도 달성한 방식 + Whisper 발화속도 보정:
-        - baseline_proba: 정상 상태 피처로 예측한 확률
-        - current_proba: 현재 피처로 예측한 확률
-        - delta = current_proba - baseline_proba
-        - delta >= threshold(0.08) → drunk
-        - (선택) Whisper 발화속도 분석으로 확률 보정
-        
         Args:
             audio_path: 테스트 오디오 경로
             baseline_features: 베이스라인 openSMILE 피처
             current_speech_rate: 현재 Whisper 발화속도 (선택)
             baseline_speech_rate: 베이스라인 Whisper 발화속도 (선택)
+        
+        Raises:
+            ValueError: 녹음에 발화가 감지되지 않은 경우
         """
         current_features = self.extract_features(audio_path)
+
+        if not self._check_voice_activity(current_features):
+            raise ValueError("녹음에서 음성이 감지되지 않았어요. 문장을 소리 내어 읽어주세요.")
 
         if self.training_mode == "delta_features":
             return self._predict_delta_features(
