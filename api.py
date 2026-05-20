@@ -166,7 +166,7 @@ def load_baseline_features(member_id: str) -> Optional[np.ndarray]:
         row = cur.fetchone()
         if not row or row[0] is None:
             return None
-        return np.frombuffer(bytes(row[0]), dtype=np.float64)
+        return np.frombuffer(bytes(row[0]), dtype=np.float32)
     finally:
         conn.close()
 
