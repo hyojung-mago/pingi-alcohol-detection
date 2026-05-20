@@ -1,49 +1,55 @@
 {
-  "version": "v2",
-  "created_at": "2026-05-19T03:30:23.720338",
+  "version": "v2-delta",
+  "created_at": "2026-05-20T16:44:54.625334",
+  "training": {
+    "mode": "delta_features",
+    "baseline_n": 5,
+    "alc_cache": "/Users/gimhyojeong/Desktop/Pingi-all/Pingi-demo/data/cache/alc_features.npz"
+  },
   "drunk_detection": {
-    "model": "SVM Linear",
-    "optimal_threshold": 0.08000000000000024,
-    "accuracy": 0.7510288065843621,
-    "f1": 0.8099277411247251,
+    "model": "SVM Linear (ALC, delta_features)",
+    "optimal_threshold": 0.6249999999999997,
+    "level_thresholds": {
+      "0": 0.6249999999999997,
+      "1": 0.715332134831939,
+      "2": 0.789940522453112,
+      "3": 0.8416709150772921,
+      "4": 0.8988292521573127,
+      "5": 1.0
+    },
+    "accuracy": 0.7950617283950617,
+    "f1": 0.8400770712909441,
+    "precision": 0.8755020080321285,
+    "recall": 0.8074074074074075,
+    "cv_accuracy": 0.7152272727272726,
+    "level_accuracy": 0.7950617283950617,
+    "n_eval_samples": 2430,
     "feature_importance_top20": {
-      "F2amplitudeLogRelF0_sma3nz_stddevNorm": 4.531016491751842,
-      "F0semitoneFrom27.5Hz_sma3nz_amean": 3.4563633534017555,
-      "F2amplitudeLogRelF0_sma3nz_amean": 2.81620614992579,
-      "F3amplitudeLogRelF0_sma3nz_stddevNorm": -1.9360030921953353,
-      "MeanVoicedSegmentLengthSec": -1.5199889826212427,
-      "mfcc1_sma3_amean": -1.3933732330170159,
-      "VoicedSegmentsPerSec": -1.391894614804471,
-      "loudness_sma3_amean": 1.166214645528612,
-      "alphaRatioV_sma3nz_stddevNorm": 1.0182351883774174,
-      "HNRdBACF_sma3nz_amean": -0.9625271559736461,
-      "F0semitoneFrom27.5Hz_sma3nz_percentile80.0": -0.9456512527204097,
-      "spectralFluxV_sma3nz_stddevNorm": 0.9069719403810197,
-      "spectralFlux_sma3_stddevNorm": -0.8978305927812045,
-      "StddevVoicedSegmentLengthSec": 0.8328725174692977,
-      "F0semitoneFrom27.5Hz_sma3nz_percentile20.0": -0.8222939914463154,
-      "F1amplitudeLogRelF0_sma3nz_amean": 0.7551926296750651,
-      "loudness_sma3_stddevNorm": 0.7273244696464474,
-      "hammarbergIndexV_sma3nz_amean": 0.7215093410944391,
-      "alphaRatioV_sma3nz_amean": 0.6719007961973489,
-      "loudness_sma3_percentile50.0": -0.665027974449572
+      "F2amplitudeLogRelF0_sma3nz_stddevNorm": 3.0570842358683024,
+      "F1amplitudeLogRelF0_sma3nz_amean": -2.2821350342470055,
+      "F2amplitudeLogRelF0_sma3nz_amean": 2.1849402486017198,
+      "F1amplitudeLogRelF0_sma3nz_stddevNorm": -1.8518809680615789,
+      "F3amplitudeLogRelF0_sma3nz_amean": 1.7953942557269045,
+      "spectralFlux_sma3_stddevNorm": -1.2854765066591085,
+      "spectralFluxV_sma3nz_stddevNorm": 1.1914139789945608,
+      "alphaRatioV_sma3nz_stddevNorm": 0.8578280718106726,
+      "loudness_sma3_stddevNorm": 0.814355476350471,
+      "hammarbergIndexV_sma3nz_amean": 0.7103706266332779,
+      "loudness_sma3_amean": 0.6468559725296075,
+      "F0semitoneFrom27.5Hz_sma3nz_amean": 0.6141812393991586,
+      "mfcc2_sma3_amean": -0.6136363253850732,
+      "hammarbergIndexV_sma3nz_stddevNorm": 0.591431399635411,
+      "spectralFluxV_sma3nz_amean": 0.5837901585532563,
+      "mfcc2V_sma3nz_amean": -0.515420700851962,
+      "mfcc1_sma3_amean": -0.4929087495446254,
+      "mfcc1V_sma3nz_amean": -0.4851763446089592,
+      "F0semitoneFrom27.5Hz_sma3nz_percentile50.0": 0.4635882225657255,
+      "mfcc3V_sma3nz_amean": 0.45194593087433077
     }
   },
-  "fake_drunk_detection": {
-    "accuracy": 0.9888888888888889,
-    "f1": 0.9811320754716981,
-    "n_real": 200,
-    "n_fake": 100
-  },
   "usage": {
-    "baseline_comparison": "delta >= 0.080 → drunk",
-    "fake_detection": "probability >= 0.5 → fake drunk acting"
-  },
-  "updated_at": "2026-05-19T10:33:43.432548",
-  "files": {
-    "model_v2": "drunk_detector_v2.pkl",
-    "fake_detector": "fake_drunk_detector_v1.pkl",
-    "architecture_diagram": "ML_ARCHITECTURE.png",
-    "report": "FINAL_REPORT.md"
+    "baseline_comparison": "proba(current-baseline) >= 0.625 → drunk",
+    "level_mapping": "level = f(proba) with level_thresholds on delta-feature model output",
+    "model_file": "drunk_detector_v2-delta.pkl"
   }
 }

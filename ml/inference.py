@@ -1,16 +1,19 @@
 """
 inference.py - SVM 추론
-=======================
 
-학습된 SVM 모델로 음성 취도를 예측합니다.
-모델은 Pingi-demo에서 ALC 데이터로 학습되었습니다.
+training_mode:
+  delta_features (v2-delta, production):
+    X = current_features - baseline_features
+    proba = SVM(X)
+    is_drunk = proba >= optimal_threshold
+    level = level_thresholds(proba)  # L0~L5, train_alc fit
+    change_pct = (proba - proba_at_zero_drift) × 100  # baseline 대비, threshold 대비 아님
 
-사용법:
-  detector = DrunkDetector()
-  result = detector.predict("audio.wav")
-  result = detector.predict_with_baseline("test.wav", baseline_features)
+  absolute (v2 legacy):
+    proba on absolute features, delta = proba_current - proba_baseline
 """
 
+import json
 import logging
 import random
 from dataclasses import dataclass
@@ -20,11 +23,26 @@ from typing import Dict, List, Optional, Union
 import numpy as np
 import joblib
 
-from .config import MODEL_PATH, INFERENCE_CONFIG, WHISPER_CONFIG, FAKE_DRUNK_CONFIG
+from .config import MODEL_PATH, INFERENCE_CONFIG, WHISPER_CONFIG, FAKE_DRUNK_CONFIG, SYNTHETIC_VOICE_CONFIG
 from .feature_extractor import FeatureExtractor, get_extractor
 from .speech_rate import SpeechRateFeatures, calculate_speech_rate_score, combine_probabilities
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SyntheticVoiceResult:
+    """합성(TTS) 음성 감지 결과."""
+    is_synthetic: bool
+    probability: float
+    message: str
+
+    def to_dict(self) -> Dict:
+        return {
+            "is_synthetic": self.is_synthetic,
+            "probability": round(self.probability, 3),
+            "message": self.message,
+        }
 
 
 @dataclass
@@ -51,6 +69,7 @@ class PredictionResult:
     level_description: str
     confidence: str             # low, medium, high
     confidence_score: float
+    change_pct: float = 0.0     # 베이스라인 대비 delta (%p), 없으면 0
     raw_features: Optional[Dict] = None
     baseline_comparison: Optional[Dict] = None
 
@@ -62,6 +81,7 @@ class PredictionResult:
             "level_description": self.level_description,
             "confidence": self.confidence,
             "confidence_score": round(self.confidence_score, 3),
+            "change_pct": self.change_pct,
             "raw_features": self.raw_features,
             "baseline_comparison": self.baseline_comparison,
         }
@@ -89,6 +109,37 @@ class DrunkDetector:
         self._model = None
         self._extractor = None
         self._loaded = False
+        self.delta_threshold = INFERENCE_CONFIG.delta_threshold
+        self.level_thresholds = dict(INFERENCE_CONFIG.level_thresholds)
+        self.training_mode = "absolute"  # absolute | delta_features
+
+    def _load_weights_from_json(self):
+        candidates = [MODEL_PATH / f"final_weights_{self.version}.json"]
+        if self.version in ("v2", "v2-delta"):
+            candidates.append(MODEL_PATH / "final_weights.json")
+        for weights_path in candidates:
+            if not weights_path.exists():
+                continue
+            try:
+                data = json.loads(weights_path.read_text(encoding="utf-8"))
+                if data.get("version") and data["version"] != self.version:
+                    if self.version not in ("v2", "v2-delta"):
+                        continue
+                training = data.get("training", {})
+                drunk = data.get("drunk_detection", {})
+                if training.get("mode"):
+                    self.training_mode = training["mode"]
+                self.delta_threshold = float(
+                    drunk.get("optimal_threshold", self.delta_threshold)
+                )
+                raw_levels = drunk.get("level_thresholds")
+                if raw_levels:
+                    self.level_thresholds = {
+                        int(k): float(v) for k, v in raw_levels.items()
+                    }
+                return
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                continue
 
     def load(self):
         if self._loaded:
@@ -97,17 +148,17 @@ class DrunkDetector:
             raise FileNotFoundError(f"모델 파일 없음: {self.model_path}")
         logger.info(f"모델 로드: {self.model_path}")
         raw = joblib.load(self.model_path)
-        # pkl이 dict 래핑인 경우 (model, feature_weights, feature_names)
+        # pkl이 dict 래핑인 경우 (model, feature_names, training_mode)
         if isinstance(raw, dict) and "model" in raw:
             self._model = raw["model"]
-            self._feature_weights = raw.get("feature_weights")
+            self.training_mode = raw.get("training_mode", self.training_mode)
             logger.info(f"  dict 래핑 모델 (keys: {list(raw.keys())})")
         else:
             self._model = raw
-            self._feature_weights = None
+        self._load_weights_from_json()
         self._extractor = get_extractor()
         self._loaded = True
-        logger.info("모델 로드 완료")
+        logger.info("모델 로드 완료 (mode=%s, threshold=%.3f)", self.training_mode, self.delta_threshold)
 
     @property
     def model(self):
@@ -127,16 +178,10 @@ class DrunkDetector:
             raise ValueError(f"피처 추출 실패: {audio_path}")
         return features
 
-    def _apply_weights(self, features: np.ndarray) -> np.ndarray:
-        """학습 시 사용한 feature_weights 적용."""
-        if self._feature_weights is not None:
-            return features * self._feature_weights
-        return features
-
     def predict(self, audio_path: Union[str, Path], return_features: bool = False) -> PredictionResult:
         """단일 오디오 취도 예측."""
         features = self.extract_features(audio_path)
-        X = self._apply_weights(features).reshape(1, -1)
+        X = features.reshape(1, -1)
         proba = self.model.predict_proba(X)[0, 1]
 
         level = self._determine_level(proba)
@@ -152,6 +197,93 @@ class DrunkDetector:
             confidence=confidence,
             confidence_score=conf_score,
             raw_features=raw_features,
+        )
+
+    def _predict_delta_features(
+        self,
+        current_features: np.ndarray,
+        baseline_features: np.ndarray,
+        current_speech_rate: Optional[SpeechRateFeatures] = None,
+        baseline_speech_rate: Optional[SpeechRateFeatures] = None,
+    ) -> PredictionResult:
+        """delta_features: (current - baseline) 피처 → SVM proba.
+
+        change_pct = (proba - proba_at_zero_drift) × 100
+          - baseline과 동일하게 읽으면 ≈ 0 (본인 sober 대비 변화 없음)
+          - threshold 대비 초과량이 아님
+        """
+        delta_features = current_features - baseline_features
+        X_delta = delta_features.reshape(1, -1)
+        current_proba = float(self.model.predict_proba(X_delta)[0, 1])
+        threshold = self.delta_threshold
+
+        # proba when delta_features=0 (baseline과 동일 drift). change_pct 기준점.
+        X_zero = np.zeros_like(delta_features).reshape(1, -1)
+        baseline_proba = float(self.model.predict_proba(X_zero)[0, 1])
+        # baseline 대비 proba drift (%p). threshold 대비 아님.
+        delta = current_proba - baseline_proba
+
+        speech_rate_score = None
+        speech_rate_info = None
+        final_proba = current_proba
+
+        if (
+            WHISPER_CONFIG.enabled
+            and current_speech_rate is not None
+            and baseline_speech_rate is not None
+        ):
+            speech_rate_score = calculate_speech_rate_score(
+                baseline_rate=baseline_speech_rate.syllables_per_sec,
+                current_rate=current_speech_rate.syllables_per_sec,
+                max_decrease_ratio=WHISPER_CONFIG.max_decrease_ratio,
+            )
+            final_proba = combine_probabilities(
+                svm_proba=current_proba,
+                speech_rate_score=speech_rate_score,
+                svm_weight=WHISPER_CONFIG.svm_weight,
+            )
+            speech_rate_info = {
+                "baseline_rate": baseline_speech_rate.syllables_per_sec,
+                "current_rate": current_speech_rate.syllables_per_sec,
+                "rate_change": (
+                    (baseline_speech_rate.syllables_per_sec - current_speech_rate.syllables_per_sec)
+                    / baseline_speech_rate.syllables_per_sec * 100
+                    if baseline_speech_rate.syllables_per_sec > 0 else 0
+                ),
+                "speech_rate_score": speech_rate_score,
+                "svm_weight": WHISPER_CONFIG.svm_weight,
+            }
+
+        if speech_rate_score is not None and speech_rate_score >= 0.5:
+            is_drunk = current_proba >= (threshold * 0.85) or speech_rate_score >= 0.7
+        else:
+            is_drunk = current_proba >= threshold
+
+        level = self._determine_level(current_proba)
+        confidence, conf_score = self._calculate_confidence(final_proba)
+        feature_changes = self._calculate_feature_changes(baseline_features, current_features)
+
+        baseline_comparison = {
+            "baseline_proba": baseline_proba,
+            "current_proba": current_proba,
+            "delta": delta,
+            "threshold": threshold,
+            "training_mode": "delta_features",
+            "feature_changes": feature_changes,
+        }
+        if speech_rate_info:
+            baseline_comparison["speech_rate"] = speech_rate_info
+
+        return PredictionResult(
+            is_drunk=is_drunk,
+            probability=float(final_proba),
+            level=level,
+            level_description=self.LEVEL_DESCRIPTIONS[level],
+            confidence=confidence,
+            confidence_score=conf_score,
+            change_pct=round(delta * 100, 1),
+            raw_features=self._extract_key_features(current_features),
+            baseline_comparison=baseline_comparison,
         )
 
     def predict_with_baseline(
@@ -177,18 +309,24 @@ class DrunkDetector:
             baseline_speech_rate: 베이스라인 Whisper 발화속도 (선택)
         """
         current_features = self.extract_features(audio_path)
-        
-        # 현재 피처 확률
-        X_current = self._apply_weights(current_features).reshape(1, -1)
+
+        if self.training_mode == "delta_features":
+            return self._predict_delta_features(
+                current_features,
+                baseline_features,
+                current_speech_rate,
+                baseline_speech_rate,
+            )
+
+        # absolute 모드: proba delta 비교
+        X_current = current_features.reshape(1, -1)
         current_proba = self.model.predict_proba(X_current)[0, 1]
-        
-        # 베이스라인 피처 확률
-        X_baseline = self._apply_weights(baseline_features).reshape(1, -1)
+        X_baseline = baseline_features.reshape(1, -1)
         baseline_proba = self.model.predict_proba(X_baseline)[0, 1]
         
         # Demo 방식: 단순 delta 비교
         delta = current_proba - baseline_proba
-        threshold = INFERENCE_CONFIG.delta_threshold
+        threshold = self.delta_threshold
         
         # 발화속도 보정 (Whisper 피처가 있으면)
         speech_rate_score = None
@@ -237,8 +375,13 @@ class DrunkDetector:
             is_drunk = delta >= (threshold * 0.5) or speech_rate_score >= 0.7
         else:
             is_drunk = delta >= threshold
-        
-        level = self._determine_level(final_proba)
+
+        # 레벨은 베이스라인 대비 delta로 산정한다.
+        # anchor = level_thresholds[0] - delta_threshold → drunk 경계와 L0/L1 경계가 정렬됨
+        # (예: 0.26 - 0.08 = 0.18). delta=0이면 L0, delta가 drunk_threshold를 넘는 순간 L1로 진입.
+        level_anchor = self.level_thresholds[0] - threshold
+        adjusted_proba = max(0.0, min(1.0, level_anchor + delta))
+        level = self._determine_level(adjusted_proba)
         confidence, conf_score = self._calculate_confidence(final_proba)
         
         # 피처 변화 정보 (디버깅/분석용)
@@ -262,6 +405,7 @@ class DrunkDetector:
             level_description=self.LEVEL_DESCRIPTIONS[level],
             confidence=confidence,
             confidence_score=conf_score,
+            change_pct=round(delta * 100, 1),
             raw_features=self._extract_key_features(current_features),
             baseline_comparison=baseline_comparison,
         )
@@ -271,8 +415,8 @@ class DrunkDetector:
         return self.extract_features(audio_path)
 
     def _determine_level(self, probability: float) -> int:
-        """확률에서 0~5단계 레벨 결정."""
-        thresholds = INFERENCE_CONFIG.level_thresholds
+        """SVM proba → L0~L5. level_thresholds는 train_alc same-person fit (final_weights.json)."""
+        thresholds = self.level_thresholds
         if probability < thresholds[0]:
             return 0
         elif probability < thresholds[1]:
@@ -398,6 +542,136 @@ class DrunkDetector:
         return min(max(score, 0.0), 1.0)
 
 
+class SyntheticVoiceDetector:
+    """실제 녹음 vs 합성 음성 분류 — SVM + AASIST-L 앙상블.
+
+    전략 (테스트 결과 기반):
+      1. SVM (openSMILE eGeMAPSv02): 우리 데이터에서 완벽 분류
+         - 실제 음성: 0.000~0.043, TTS: 1.000
+         - 폰 녹음도 정확히 real 판정
+      2. AASIST-L (raw waveform GNN): ASVspoof pretrained
+         - ALC 실제: 0.018~0.273 ✅
+         - 폰 녹음: 0.93~0.99 ❌ (코덱 아티팩트 오탐)
+         - TTS: 대부분 >0.7 but 일부 miss (0.12, 0.16)
+
+      → SVM 주도 + AASIST 보조:
+        - SVM 확신 (>0.9): SVM 결과 채택 (AASIST 무시)
+        - SVM 불확실 (0.3~0.9): 앙상블 (SVM 70% + AASIST 30%)
+        - SVM < 0.3 but AASIST > 0.8: 경고 플래그 (추가 확인 권고)
+    """
+
+    SVM_WEIGHT = 0.7
+    AASIST_WEIGHT = 0.3
+    SVM_CONFIDENT_THRESHOLD = 0.9  # SVM만으로 확정
+    SVM_REJECT_THRESHOLD = 0.3     # SVM이 "아닌 것 같다"고 확신
+
+    def __init__(self, model_path: Union[str, Path] = None):
+        if model_path is None:
+            model_path = MODEL_PATH / SYNTHETIC_VOICE_CONFIG.model_filename
+        self.model_path = Path(model_path)
+        self._model = None
+        self._feature_weights = None
+        self._extractor = None
+        self._aasist = None
+        self._loaded = False
+        self.threshold = SYNTHETIC_VOICE_CONFIG.threshold
+
+    def _load_threshold(self):
+        weights_path = MODEL_PATH / SYNTHETIC_VOICE_CONFIG.weights_filename
+        if not weights_path.exists():
+            return
+        try:
+            data = json.loads(weights_path.read_text(encoding="utf-8"))
+            self.threshold = float(
+                data.get("detection", {}).get("optimal_threshold", self.threshold)
+            )
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            pass
+
+    def load(self):
+        if self._loaded:
+            return
+        if not self.model_path.exists():
+            raise FileNotFoundError(f"합성음성 모델 없음: {self.model_path}")
+        logger.info(f"합성음성 SVM 모델 로드: {self.model_path}")
+        raw = joblib.load(self.model_path)
+        if isinstance(raw, dict) and "model" in raw:
+            self._model = raw["model"]
+            self._feature_weights = raw.get("feature_weights")
+        else:
+            self._model = raw
+        self._load_threshold()
+        self._extractor = get_extractor()
+
+        # AASIST-L (optional — 없으면 SVM-only)
+        try:
+            from .aasist_detector import AASISTDetector
+            self._aasist = AASISTDetector()
+            self._aasist.load()
+            logger.info("AASIST-L 앙상블 활성화")
+        except (FileNotFoundError, ImportError) as e:
+            self._aasist = None
+            logger.info(f"AASIST-L 스킵 (SVM-only): {e}")
+
+        self._loaded = True
+
+    def _pick_message(self) -> str:
+        return random.choice(list(SYNTHETIC_VOICE_CONFIG.messages))
+
+    def predict(self, audio_path: Union[str, Path]) -> SyntheticVoiceResult:
+        if not self._loaded:
+            self.load()
+        features = self._extractor.extract(Path(audio_path))
+        if features is None:
+            raise ValueError(f"피처 추출 실패: {audio_path}")
+        if self._feature_weights is not None:
+            features = features * self._feature_weights
+        svm_proba = float(self._model.predict_proba(features.reshape(1, -1))[0, 1])
+
+        # AASIST-L ensemble
+        if self._aasist is not None:
+            try:
+                ar = self._aasist.predict(audio_path)
+                aasist_proba = ar.spoof_probability
+            except Exception as e:
+                logger.warning(f"AASIST 추론 실패: {e}")
+                aasist_proba = None
+        else:
+            aasist_proba = None
+
+        final_proba = self._ensemble(svm_proba, aasist_proba)
+        is_synth = final_proba >= self.threshold
+
+        logger.info(
+            "SyntheticDetector: svm=%.3f aasist=%s → final=%.3f (%s)",
+            svm_proba,
+            f"{aasist_proba:.3f}" if aasist_proba is not None else "N/A",
+            final_proba,
+            "SYNTHETIC" if is_synth else "real",
+        )
+
+        return SyntheticVoiceResult(
+            is_synthetic=is_synth,
+            probability=final_proba,
+            message=self._pick_message() if is_synth else "",
+        )
+
+    def _ensemble(self, svm: float, aasist: Optional[float]) -> float:
+        """SVM 주도 앙상블."""
+        if aasist is None:
+            return svm
+
+        # SVM 확신 high → SVM 결과 신뢰
+        if svm >= self.SVM_CONFIDENT_THRESHOLD:
+            return svm
+        # SVM 확신 low (real) → SVM 신뢰 (AASIST의 폰 녹음 오탐 방지)
+        if svm <= self.SVM_REJECT_THRESHOLD:
+            return svm
+
+        # SVM 불확실 영역 → 가중 평균
+        return self.SVM_WEIGHT * svm + self.AASIST_WEIGHT * aasist
+
+
 class FakeDrunkDetector:
     """진짜 취함(ALC) vs 취한 척 연기(Thorsten) 분류."""
 
@@ -445,6 +719,7 @@ class FakeDrunkDetector:
 # 싱글톤
 _detector: Optional[DrunkDetector] = None
 _fake_detector: Optional[FakeDrunkDetector] = None
+_synthetic_detector: Optional[SyntheticVoiceDetector] = None
 
 
 def get_detector() -> DrunkDetector:
@@ -452,6 +727,13 @@ def get_detector() -> DrunkDetector:
     if _detector is None:
         _detector = DrunkDetector()
     return _detector
+
+
+def get_synthetic_detector() -> SyntheticVoiceDetector:
+    global _synthetic_detector
+    if _synthetic_detector is None:
+        _synthetic_detector = SyntheticVoiceDetector()
+    return _synthetic_detector
 
 
 def get_fake_detector() -> FakeDrunkDetector:
