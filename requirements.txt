@@ -16,5 +16,8 @@ numpy>=1.24.0
 # 피처 추출
 opensmile>=2.5.0,<3.0.0
 
+# HTTP 클라이언트 (Whisper API 호출)
+httpx>=0.25.0
+
 # 오디오 처리 (ffmpeg은 시스템 패키지)
 soundfile>=0.12.0

@@ -1,0 +1,49 @@
+# Pingi-AI Docker Ignore
+
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Audio / binary
+*.wav
+*.webm
+*.mp3
+*.mp4
+*.ogg
+*.flac
+
+# Data
+data/
+
+# Environment
+.env
+.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Docs & tests
+docs/
+*.md
+test_*.py
